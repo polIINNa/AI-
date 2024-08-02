@@ -1,4 +1,3 @@
-
 import pandas as pd
 
 
@@ -20,3 +19,12 @@ def get_last_chains(how_many=5):
         return df.tail(how_many)
     except:
         return ''
+
+
+def get_action(actions: str):
+    """Парсим цепочку действий для получения действия, которое надо выполнять в текущий момент"""
+    if "<BEGIN>" in actions:
+        action = actions.split('->')[1].strip()
+    else:
+        action = actions.split('->')[0].strip()
+    return action

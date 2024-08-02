@@ -1,0 +1,11 @@
+version: "3.8"
+
+services:
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - ./log/:/consultant/log/
+    env_file:
+      - .env
