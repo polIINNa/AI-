@@ -3,17 +3,12 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import Field
-
 import httpx
-import pandas as pd
-import traceback
-
-# pydantic
 from typing import TypedDict, Annotated, Sequence, Optional, Dict
 import operator
-from dotenv import load_dotenv
 
+from dotenv import load_dotenv
+import pandas as pd
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import BaseMessage, FunctionMessage, HumanMessage
 from langchain_core.tools import tool
@@ -22,7 +17,8 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langgraph.prebuilt import ToolExecutor, ToolInvocation
 from langgraph.graph import StateGraph, END
 
-from prompt import SYSTEM_PROMPT_2
+from data.prompt import SYSTEM_PROMPT_2
+
 
 load_dotenv()
 
@@ -38,7 +34,6 @@ if __name__ == '__main__':
         df_dict.append(d)
     df = pd.json_normalize(df_dict)
     dfs_dict = {'df_deposit': df}
-
 
     # Парсим цепочку действий для получения действия, которое надо выполнять в текущий момент
     def get_action(actions):
@@ -82,74 +77,19 @@ if __name__ == '__main__':
                 return 'Success', action, inter
         except Exception as e:
             print('ОШИБКА при исполнении цепочки ')
-            # print(traceback.format_exc())
             print(e)
             return f"An exception occured: {e}", action, prev_inter_df
-
-
-    # @tool
-    # def view_pandas_dataframes(
-    #         df_names_list: Annotated[
-    #             Sequence[str], "List of maximum 3 pandas dataframes you want to look at, e.g. [df1, df2, df3]"]):
-    #     """Use this to view the head(10) of dataframes to answer your question"""
-    #
-    #     markdown_str = "Here are .head(10) of the dataframes you requested to see:\n"
-    #     for df in df_names_list:
-    #         df_head = df_dic[df].head(10).to_markdown()
-    #         markdown_str += f"{df}:\n{df_head}\n"
-    #
-    #     markdown_str = markdown_str.strip()
-    #     return markdown_str
-
-    # tool для исполнения действия из цепочки
-    # @tool
-    # def evaluate_pandas_chain(chain: Annotated[str, "Цепочка действий, которые применяются к pandas датафрейму, например df1.groupby('age').mean() -> df1.sort_values() -> <END>"],
-    #                           inter):
-    #     """
-    #     Evaluate a sequence of actions applied to a pandas dataframe.
-    #
-    #     Arguments:
-    #     chain -- Цепочка действий, которые применяются к pandas датафрейму, например df1.groupby('age').mean() -> df1.sort_values() -> <END>
-    #     inter -- Промежуточный pandas DataFrame
-    #
-    #     Returns:
-    #     Результаты выполнения действий из цепочки, текущая операция, обновленный промежуточный DataFrame.
-    #     """
-    #     action = get_action(actions=chain)
-    #     print(f'РАБОТА TOOL evaluate_pandas_chain. Операция: {action}')
-    #     try:
-    #         upd_inter = eval(action, {"inter": inter, "df_dic": df_dic})
-    #         if upd_inter is None or upd_inter.isna().all().all():
-    #             return 'Empty dataframe', action, inter
-    #         else:
-    #             return 'Success', action, upd_inter
-    #     except Exception as e:
-    #         print('ОШИБКА при исполнении цепочки ')
-    #         # print(traceback.format_exc())
-    #         print(e)
-    #         return f"An exception occured: {e}", action, inter
 
     tools = [evaluate_pandas_chain, view_pandas_dataframes]
     tool_executor = ToolExecutor(tools)
     functions = [convert_to_openai_function(t) for t in tools]  # из тулов langchain получаем функции для gpt openai
 
-    # SYSTEM_PROMPT = hub.pull("hrubyonrails/multi-cot").messages[0].prompt.template
     prompt = ChatPromptTemplate.from_messages(
         [("system", SYSTEM_PROMPT_2), MessagesPlaceholder(variable_name="messages")])
-    # prompt = prompt.partial(num_dfs=len(df_list))
     prompt = prompt.partial(tool_names=", ".join([tool.name for tool in tools]))
-    # prompt = prompt.partial(df_descriptions=df_descriptions)
-    # passing in past successful queries
-    # chain_examples = ""
-    # if type(get_last_chains()) == pd.core.frame.DataFrame:
-    #     for index, row in get_last_chains()[["query", "chain"]].iterrows():
-    #         chain_examples += f'Question: {row["query"]}\nChain: {row["chain"]}\n\n'
-    # prompt = prompt.partial(chain_examples=chain_examples)
-
     llm = ChatOpenAI(model_name="gpt-4o", http_client=httpx.Client(proxies=os.getenv('OPENAI_PROXY')),
                      openai_api_key=os.getenv('OPENAI_API_KEY'))
     llm_chain = prompt | llm.bind_functions(functions)
-
 
     # Определение состояний графа
     class AgentState(TypedDict):
@@ -306,7 +246,6 @@ if __name__ == '__main__':
                 else:
                     if "actions" in value.keys():
                         print('action')
-                        # print(f"🛠️ Current action: {value['actions']}")
                     else:
                         print(f"⚠️ An error occured or empty dataframe, retrying...")
             else:
