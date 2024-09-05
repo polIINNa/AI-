@@ -58,19 +58,18 @@ if __name__ == '__main__':
         prev_inter = inter
         action = actions[0]
         try:
-            print('СТАРТ ИСПОЛНЕНИЯ ЦЕПОЧКИ')
+            print('Старт исполнения цепочки')
             for action in actions:
-                print('ТЕКУЩАЯ ОПЕРАЦИЯ', action)
+                print('Текущая операция', action)
                 inter = eval(action, {'otr_transport': otr_transport, 'inter': prev_inter})
                 if inter is None:
-                    print(f'В ПРОЦЕССЕ ВЫПОЛНЕНИЯ ОПЕРАЦИИ {action} ПОЛУЧИЛСЯ ПУСТОЙ ДАТАФРЕЙМ')
+                    print(f'В процессе операции {action} получился пустой датафрейм')
                     return 'None DF', success_actions, prev_inter, action
                 success_actions.append(action)
                 prev_inter = inter
-            print('УРА, ЦЕПОЧКА ОТРАБОТАЛА УСПЕШНО')
+            print('Ура, цепочка исполнена успешно')
             return 'Success', success_actions, inter
         except Exception as e:
-            print(e)
             if str(e) == "invalid syntax (<string>, line 1)":
                 return 'Ошибка: нельзя использовать операцию присваивания "=" ', success_actions, prev_inter, action
             return f'Error: {str(e)}', success_actions, prev_inter, action
@@ -83,7 +82,7 @@ if __name__ == '__main__':
     prompt = ChatPromptTemplate.from_messages(
         [("system", OTR_SYSTEM_PROMPT), MessagesPlaceholder(variable_name="messages")])
     prompt = prompt.partial(tool_names=", ".join([tool.name for tool in tools]))
-    gpt = ChatOpenAI(model_name="gpt-4o", http_client=httpx.Client(proxies=os.getenv('OPENAI_PROXY')),
+    gpt = ChatOpenAI(model_name="gpt-4o-mini", http_client=httpx.Client(proxies=os.getenv('OPENAI_PROXY')),
                      openai_api_key=os.getenv('OPENAI_API_KEY'), temperature=0)
     gigachat = GigaChat(credentials=os.getenv('GIGA_CREDENTIALS'), scope=os.getenv('GIGA_SCOPE'),
                         model=os.getenv('GIGA_MODEL'))
@@ -96,12 +95,9 @@ if __name__ == '__main__':
 
     def should_continue(state):
         last_message = state['messages'][-1]
-        print('should_continue: ', last_message)
         if "function_call" not in last_message.additional_kwargs:
-            print('нет вызова тула')
             return "end"
         else:
-            print('есть вызов тула')
             return "continue"
 
 
@@ -220,9 +216,7 @@ if __name__ == '__main__':
         'agent',  # вершина, после которой будет вызвано условное ребро
         should_continue,
         {
-            # If `tools`, then we call the tool node.
             "continue": "tool",
-            # Otherwise we finish.
             "end": END
         }
     )
@@ -232,14 +226,23 @@ if __name__ == '__main__':
 
     user_query = "Какой объем выручки у компании с inn= 360400269820 в марте?"
     inputs = {"messages": [HumanMessage(content=user_query)], "question": user_query}
+    answer = ''
     for output in app.stream(inputs, {"recursion_limit": 30}):
         for key, value in output.items():
-            if key == "agent":
-                print("🤖 Агент отработал...")
-            else:
-                if value["messages"][0].name == "view_pandas_dataframes":
-                    print("🛠️ Отработал инструмент view_pandas_dataframes...")
+            if key == 'agent':
+                print('🤖 Получен ответ агента AIMessage 🤖')
+                aim = value['messages'][0]
+                if aim.additional_kwargs != {}:
+                    print(f'Агент вызвал функцию: {aim.additional_kwargs}')
                 else:
-                    print("🛠️ Отработал инструмент evaluate_pandas_chain...")
-            print("---")
-            pass
+                    answer = aim.content
+                    print(f'Агент сформировал сообщение без вызова функции: {aim.content}')
+            else:
+                fm = value["messages"][0]
+                print(f'🛠️ Отработала функция {fm.name}')
+                if 'Сообщение об ошибке' in fm.content:
+                    print('⚠️ Функция завершила работу с ошибкой')
+                else:
+                    print('✅ Функция завершила работу успешно')
+            print('------')
+    print('ФИНАЛЬНЫЙ ОТВЕТ: ', answer)
