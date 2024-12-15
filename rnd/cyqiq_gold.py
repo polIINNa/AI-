@@ -3,22 +3,28 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import Field
+
 import httpx
+import pandas as pd
+import traceback
+
+# pydantic
 from typing import TypedDict, Annotated, Sequence, Optional, Dict
 import operator
-
 from dotenv import load_dotenv
-import pandas as pd
+
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import BaseMessage, FunctionMessage, HumanMessage
 from langchain_core.tools import tool
 from langchain_core.utils.function_calling import convert_to_openai_function
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain import hub
 from langgraph.prebuilt import ToolExecutor, ToolInvocation
 from langgraph.graph import StateGraph, END
 
+from agent.utils import get_last_chains, save_new_chain
 from data.prompt import SYSTEM_PROMPT
-
 
 load_dotenv()
 
@@ -33,73 +39,96 @@ if __name__ == '__main__':
             d[key] = data[deposit_name][key]
         df_dict.append(d)
     df = pd.json_normalize(df_dict)
-    df = df.fillna("")
-    dfs_dict = {'df_deposit': df}
+    df_list = [df]
+    df_dic = {'df_deposit': df}
+
+
+    df_descriptions = """
+    df_deposit: Этот набор данных представляет различные виды инвестиционных продуктов, предлагаемых различными финансовыми учреждениями, с указанием процентных ставок, минимальных сумм депозитов и частоты выплаты процентов, подчеркивая разнообразие доступных потенциальным инвесторам вариантов.
+    """
 
     # Парсим цепочку действий для получения действия, которое надо выполнять в текущий момент
-    def get_action(chain: str, actions_history: Sequence[str]):
-        actions = chain.split('->')
-        if "<BEGIN>" in chain:
-            action = actions[1].strip()
+    def get_action(actions):
+        if "<BEGIN>" in actions:
+            action = actions.split('->')[1].strip()
         else:
-            prev_action = actions_history[-1]
-            action = actions[0].strip()
-            if prev_action == action:
-                if len(actions) > 2:
-                    action = actions[1].strip()
-                else:
-                    action = prev_action
+            action = actions.split('->')[0].strip()
         return action
 
 
+    # tool для получения информации о таблице
     @tool
     def view_pandas_dataframes(
-            df_name: Annotated[str, "Название таблицы, которую надо посмотреть"]):
-        """
-        Инструмент для просмотра данных в таблице
-        """
-        df = dfs_dict[df_name]
-        return f"{df.head(20).to_markdown()}".strip()
+            df_names_list: Annotated[
+                Sequence[str], "List of maximum 3 pandas dataframes you want to look at, e.g. [df1, df2, df3]"]):
+        """Use this to view the head(10) of dataframes to answer your question"""
+
+        markdown_str = "Here are .head(10) of the dataframes you requested to see:\n"
+        for df in df_names_list:
+            df_head = df_dic[df].head(10).to_markdown()
+            markdown_str += f"{df}:\n{df_head}\n"
+
+        markdown_str = markdown_str.strip()
+        return markdown_str
 
 
     @tool
     def evaluate_pandas_chain(
-            chain: Annotated[str, "Цепочка действий, которые применяются к pandas датафрейму, например df1.groupby('Минимальная ставка').mean() -> df1.sort_values() -> <END>"],
-            inter: Annotated[Optional[Dict], "Промежуточная таблица"],
-            actions_history: Annotated[Sequence[str], "История успешных действий по преобразованию pandas датафрейму"]):
+            chain: Annotated[str, "Цепочка действий, которые применяются к pandas датафрейму, "
+                                  "например df1.groupby('age').mean() -> df1.sort_values() -> <END>"],
+            inter):
         """
-        Инструмент для выполнения цепочки
+        Evaluate a sequence of actions applied to a pandas dataframe.
+
+        Arguments:
+        chain -- Цепочка действий, которые применяются к pandas датафрейму, например df1.groupby('age').mean() -> df1.sort_values() -> <END>
+        inter -- Промежуточный pandas DataFrame
+
+        Returns:
+        Результаты выполнения действий из цепочки, текущая операция, обновленный промежуточный DataFrame.
         """
-        df = dfs_dict['df_deposit']
-        action = get_action(chain=chain, actions_history=actions_history)
-        if inter is not None:
-            inter_df = pd.DataFrame(inter)
-        else:
-            inter_df = None
-        prev_inter_df = inter_df
-        print(f'Операция для выполнения: {action}')
+        action = get_action(actions=chain)
+        print(f'РАБОТА TOOL evaluate_pandas_chain. Операция: {action}')
         try:
-            inter = eval(action, {'df_deposit': df, 'inter': inter_df})
-            if inter is None or inter.isna().all().all():
-                return 'Пустой датафрейм', action, prev_inter_df
+            upd_inter = eval(action, {"inter": inter, "df_dic": df_dic})
+            if upd_inter is None:
+                return 'Empty dataframe', action, inter
             else:
-                return 'Success', action, inter
+                print(upd_inter)
+                return 'Success', action, upd_inter
         except Exception as e:
-            if str(e) == "invalid syntax (<string>, line 1)":
-                return 'Ошибка: нельзя использовать операцию присваивания "=" ', action, prev_inter_df
-            else:
-                return f"В процессе работы возникла ошибка: {str(e)}", action, prev_inter_df
+            print(e)
+            return f"An exception occured: {e}", action, inter
+
 
     tools = [evaluate_pandas_chain, view_pandas_dataframes]
     tool_executor = ToolExecutor(tools)
     functions = [convert_to_openai_function(t) for t in tools]  # из тулов langchain получаем функции для gpt openai
 
+    # SYSTEM_PROMPT = hub.pull("hrubyonrails/multi-cot").messages[0].prompt.template
     prompt = ChatPromptTemplate.from_messages(
         [("system", SYSTEM_PROMPT), MessagesPlaceholder(variable_name="messages")])
+    prompt = prompt.partial(num_dfs=len(df_list))
     prompt = prompt.partial(tool_names=", ".join([tool.name for tool in tools]))
+    prompt = prompt.partial(questions_str=df_descriptions)
+    # passing in past successful queries
+    chain_examples = ""
+    if type(get_last_chains()) == pd.core.frame.DataFrame:
+        for index, row in get_last_chains()[["query", "chain"]].iterrows():
+            chain_examples += f'Question: {row["query"]}\nChain: {row["chain"]}\n\n'
+    prompt = prompt.partial(chain_examples=chain_examples)
+
     llm = ChatOpenAI(model_name="gpt-4o", http_client=httpx.Client(proxies=os.getenv('OPENAI_PROXY')),
                      openai_api_key=os.getenv('OPENAI_API_KEY'))
     llm_chain = prompt | llm.bind_functions(functions)
+
+    # Определение состояний графа
+    class AgentState(TypedDict):
+        messages: Annotated[Sequence[BaseMessage], operator.add]
+        actions: Annotated[Sequence[str], operator.add]
+        inter: pd.DataFrame
+        question: str
+        memory: str
 
 
     def call_model(state):
@@ -121,6 +150,7 @@ if __name__ == '__main__':
         last_message = state['messages'][-1]  # последнее сообщение содержит вызов функции
         tool_input = last_message.additional_kwargs["function_call"]["arguments"]
         tool_input_dict = json.loads(tool_input)
+        tool_input_dict['inter'] = state['inter']
         if last_message.additional_kwargs['function_call']['name'] == 'view_pandas_dataframes':
             print('Вызов tool view_pandas_dataframes')
             action = ToolInvocation(
@@ -132,99 +162,76 @@ if __name__ == '__main__':
             return {"messages": [function_message]}
         elif last_message.additional_kwargs['function_call']['name'] == 'evaluate_pandas_chain':
             print('Вызов tool evaluate_pandas_chain')
-            if state['inter'] is not None:
-                tool_input_dict['inter'] = state['inter'].to_dict()
-            else:
-                tool_input_dict['inter'] = None
-            tool_input_dict['actions_history'] = state['actions']
             action = ToolInvocation(
                 tool='evaluate_pandas_chain',
                 tool_input=tool_input_dict
             )
             result = tool_executor.invoke(action)
             response, attempted_action, inter = result[0], result[1], result[2]
-            print(response)
             if inter is None:
                 print('None DF')
                 non_df_info = f"""
-                Последнее примененное действие: 
+                You have previously performed the actions: 
+                {state['actions']}
+
+                Attempted action: 
                 {attempted_action}
 
-                Таблица после выполнения действия: None
+                Response after attempted_action: 
+                {response}
 
-                Ты должен скорректировать свои действия и продолжить цепочку для получения таблицы, из которой можно ответить на вопрос:
+                Dataframe after attempted_action: None
+
+                You must correct your approach and continue until you can answer the question:
                 {state['question']}
 
-                Список успешно примененных действий: 
-                {state['actions']}
-                
+                Continue the chain with the following format: action_i -> action_i+1 ... -> <END>
                 """
+                print(response)
                 function_message = FunctionMessage(content=str(non_df_info), name=action.tool)
                 return {"messages": [function_message]}
             else:
                 if 'Success' in response:
-                    if isinstance(inter, pd.DataFrame) is True:
-                        print('SUCCESS DF')
-                        print(inter)
-                        success_info_df = f"""
-                        Последнее примененное действие: 
-                        {attempted_action}
+                    print('Success')
+                    success_info = f"""
+                    You have previously performed the actions: 
+                    {state['actions']}
 
-                        Таблица после выполнения действия: 
-                        {inter.head(10).to_markdown()}
+                    Attempted action: 
+                    {attempted_action}
 
-                        Ты должен дальше продолжить цепочку для получения таблицы, из которой можно ответить на вопрос:
-                        {state['question']}
+                    Dataframe after attempted_action:
+                    inter.head(10).to_markdown()
 
-                        Список успешно примененных действий: 
-                        {state['actions']}    
-                        
-                        """
-                        function_message = FunctionMessage(content=str(success_info_df), name=action.tool)
-                        return {"messages": [function_message], "actions": [attempted_action], "inter": inter}
-                    else:
-                        print('SUCCESS NO DF')
-                        print(inter)
-                        success_info_no_df = f"""                        
-                        Результат выполнения действия: 
-                        {inter}
+                    You must continue until you can answer the question:
+                    {state['question']}
 
-                        Ты должен ответить на вопрос:
-                        {state['question']} 
-
-                        """
-                        function_message = FunctionMessage(content=str(success_info_no_df), name=action.tool)
-                        return {"messages": [function_message], "actions": [attempted_action]}
-
+                    Continue the  chain with the following format: action_i -> action_i+1 ... -> <END>
+                    """
+                    function_message = FunctionMessage(content=str(success_info), name=action.tool)
+                    return {"messages": [function_message], "actions": [attempted_action], "inter": inter}
                 else:
                     print('Error')
                     error_info = f"""
-                    Последнее примененное действие: 
+                    You have previously performed the actions: 
+                    {state['actions']}
+
+                    Attempted action: 
                     {attempted_action}
 
-                    Сообщение об ошибке:
+                    Response after attempted_action:
                     {response}
 
-                    Ты должен скорректировать свои действия и продолжить цепочку для получения таблицы, из которой можно ответить на вопрос:
-                    {state['question']}
-
-                    Таблица ДО выполнения последнего действия:
+                    Dataframe before attempted_action:
                     {inter.head(10).to_markdown()}
 
-                    Список успешно примененных действий: 
-                    {state['actions']}
-                    
+                    You must correct your approach and continue until you can answer the question:
+                    {state['question']}
+
+                    Continue the chain with the following format: action_i -> action_i+1 ... -> <END>
                     """
                     function_message = FunctionMessage(content=str(error_info), name=action.tool)
                     return {"messages": [function_message]}
-
-    # Определение состояний графа
-    class AgentState(TypedDict):
-        messages: Annotated[Sequence[BaseMessage], operator.add]
-        actions: Annotated[Sequence[str], operator.add]
-        inter: pd.DataFrame
-        question: str
-        memory: str
 
 
     # Инициализируем граф
@@ -249,10 +256,11 @@ if __name__ == '__main__':
     workflow.add_edge('tool', 'agent')
     app = workflow.compile()
 
-    user_query = "Какие вклады можно открыть сроком более 1 года?"
+    user_query = "Какие есть вклады с максимальным сроком до 2 лет?"
     inputs = {"messages": [HumanMessage(content=user_query)], "actions": ["<BEGIN>"], "question": user_query,
               "memory": ""}
-    for output in app.stream(inputs, {"recursion_limit": 30}):
+    for output in app.stream(inputs, {"recursion_limit": 20}):
+        # stream() yields dictionaries with output keyed by node name
         for key, value in output.items():
             if key == "agent":
                 print("🤖 Agent working...")
@@ -262,9 +270,12 @@ if __name__ == '__main__':
                 else:
                     if "actions" in value.keys():
                         print('action')
+                        # print(f"🛠️ Current action: {value['actions']}")
                     else:
                         print(f"⚠️ An error occured or empty dataframe, retrying...")
             else:
                 print("🏁 Finishing up...")
             print("---")
             pass
+
+    print(output['agent']['messages'][0].content.replace('<END>', ''))

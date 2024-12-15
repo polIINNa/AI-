@@ -10,7 +10,6 @@ import operator
 from dotenv import load_dotenv
 import pandas as pd
 from langchain_openai import ChatOpenAI
-from langchain_community.chat_models.gigachat import GigaChat
 from langchain_core.messages import BaseMessage, FunctionMessage, HumanMessage
 from langchain_core.tools import tool
 from langchain_core.utils.function_calling import convert_to_openai_function
@@ -84,8 +83,7 @@ if __name__ == '__main__':
     prompt = prompt.partial(tool_names=", ".join([tool.name for tool in tools]))
     gpt = ChatOpenAI(model_name="gpt-4o-mini", http_client=httpx.Client(proxies=os.getenv('OPENAI_PROXY')),
                      openai_api_key=os.getenv('OPENAI_API_KEY'), temperature=0)
-    gigachat = GigaChat(credentials=os.getenv('GIGA_CREDENTIALS'), scope=os.getenv('GIGA_SCOPE'),
-                        model=os.getenv('GIGA_MODEL'))
+
     llm_chain = prompt | gpt.bind_functions(functions)
 
 
@@ -103,7 +101,9 @@ if __name__ == '__main__':
 
     def call_tool(state):
         last_message = state['messages'][-1]  # последнее сообщение содержит вызов функции
+        print('---LAST MESSAGE: ', last_message)
         tool_input = last_message.additional_kwargs["function_call"]["arguments"]
+        print('--- АРГУМЕНТЫ ФУНКЦИИ: ', tool_input)
         tool_input_dict = json.loads(tool_input)
 
         if last_message.additional_kwargs['function_call']['name'] == 'view_pandas_dataframes':
